@@ -1,0 +1,126 @@
+---
+version: 3
+
+images:
+  base_image:
+    name: registry.access.redhat.com/ubi10/ubi-minimal:latest
+
+options:
+  package_manager_path: /usr/bin/microdnf
+
+dependencies:
+  python_interpreter:
+    package_system: python3.14
+    python_path: /usr/bin/python3.14
+
+  ansible_core:
+    package_pip: ansible-core>=2.19,<2.22
+
+  ansible_runner:
+    package_pip: ansible-runner
+
+  system:
+    - apr-util
+    - bsdtar
+    - bind-utils
+    - bzip2
+    - git-core
+    - less
+    - jq
+    - openssh-clients
+    - rsync
+    - tar
+    - gzip
+    - shadow-utils
+    - unzip
+    - zip
+
+  galaxy:
+    collections:
+      - name: ansible.posix
+      - name: ansible.mariadb
+      - name: ansible.mysql
+      - name: ansible.utils
+      - name: ansible.windows
+      - name: community.crypto
+      - name: community.dns
+      - name: community.docker
+      - name: community.library_inventory_filtering_v1
+      - name: community.general
+      - name: community.hashi_vault
+      - name: community.libvirt
+      - name: community.postgresql
+      - name: community.proxmox
+      - name: containers.podman
+
+  python:
+    - ansible-pylibssh
+    - ansible-lint
+    - boto3
+    - cryptography
+    - dnspython
+    - docker
+    - hvac
+    - fqdn
+    - jxmlease
+    - jmespath
+    - paramiko
+    - passlib
+    - petname
+    - pexpect
+    - proxmoxer
+    - pytz
+    - pywinrm
+    - netaddr
+    - requests
+    - toml
+    - xkcdpass
+
+additional_build_steps:
+  # Build sshpass
+  append_builder:
+    - ENV SSHPASS_VERSION=1.10
+    - ENV SSHPASS_SHA256=ad1106c203cbb56185ca3bad8c6ccafca3b4064696194da879f81c8d7bdfeeda
+    - RUN microdnf install -y gcc make tar gzip curl-minimal unzip jq && microdnf clean all
+    - |
+      RUN set -eux; \
+          case "$(uname -m)" in \
+            x86_64)  prefix="bw-bit-linux-" ;; \
+            aarch64) prefix="bw-bit-linux-arm64-" ;; \
+            *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
+          esac; \
+          curl -fsSL "https://api.github.com/repos/bitwarden/clients/releases?per_page=100" -o /tmp/releases.json; \
+          asset="$(jq -c --arg p "$prefix" '[.[] | select((.tag_name | startswith("cli-v")) and (.draft | not) and (.prerelease | not))][0] | .assets[] | select((.name | startswith($p)) and (.name | endswith(".zip")))' /tmp/releases.json)"; \
+          url="$(echo "$asset" | jq -r .browser_download_url)"; \
+          digest="$(echo "$asset" | jq -r '.digest | sub("^sha256:"; "")')"; \
+          test -n "$url" -a -n "$digest" -a "$digest" != "null"; \
+          echo "Installing Bitwarden CLI from ${url}"; \
+          curl -fsSL -o /tmp/bw.zip "$url"; \
+          echo "${digest}  /tmp/bw.zip" | sha256sum -c -; \
+          unzip -o /tmp/bw.zip bw -d /tmp/bw; \
+          install -D -m 0755 /tmp/bw/bw /out/usr/local/bin/bw
+    - |
+      RUN set -eux; \
+          curl -fsSL -o /tmp/sshpass.tar.gz \
+            "https://sourceforge.net/projects/sshpass/files/sshpass/${SSHPASS_VERSION}/sshpass-${SSHPASS_VERSION}.tar.gz/download"; \
+          echo "${SSHPASS_SHA256}  /tmp/sshpass.tar.gz" | sha256sum -c -; \
+          tar xzf /tmp/sshpass.tar.gz -C /tmp; \
+          cd /tmp/sshpass-${SSHPASS_VERSION}; \
+          ./configure --prefix=/usr/local; \
+          make; \
+          make install DESTDIR=/out
+  append_final:
+    # Copy sshpass from builder
+    - COPY --from=builder /out/usr/local/bin/sshpass /usr/local/bin/sshpass
+    # Copy Bitwarden CLI from builder
+    - COPY --from=builder /out/usr/local/bin/bw /usr/local/bin/bw
+    # Make sure ansible-runner work correctly
+    - ENV HOME=/home/runner
+    - ENV ANSIBLE_HOME=/home/runner/.ansible
+    - RUN mkdir -p /home/runner/.ansible/tmp && chmod -R 777 /home/runner
+    # Install 1password-cli
+    - RUN rpm --import https://downloads.1password.com/linux/keys/1password.asc
+    - RUN sh -c 'echo -e "[1password]\nname=1Password Stable Channel\nbaseurl=https://downloads.1password.com/linux/rpm/stable/\$basearch\nenabled=1\ngpgcheck=1\nrepo_gpgcheck=1\ngpgkey=https://downloads.1password.com/linux/keys/1password.asc" > /etc/yum.repos.d/1password.repo'
+    - RUN microdnf install -y 1password-cli
+    - RUN microdnf clean all && rm -rf /var/cache/dnf /var/cache/yum
+    - RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.14 1

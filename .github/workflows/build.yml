@@ -1,0 +1,85 @@
+name: Build and publish execution environment
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  schedule:
+    # Weekly rebuild to pick up base image and package updates
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ansible-builder
+        run: pip install ansible-builder
+
+      - name: Generate build context
+        run: ansible-builder create --file execution-environment.yml --context context
+
+      - name: Install QEMU for cross-architecture builds
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+
+      - name: Compute image name
+        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch,enable=${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=ref,event=pr
+            type=sha
+
+      - name: Reduce metadata to tag names
+        id: tags
+        env:
+          META_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          # buildah-build takes the image name and tags separately.
+          # Tags are lowercased here because push-to-registry v3 no longer does it.
+          tags=$(echo "$META_TAGS" | sed 's/^[^:]*://' | tr '[:upper:]' '[:lower:]' | tr '\n' ' ')
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image with Buildah
+        id: build
+        uses: redhat-actions/buildah-build@v3
+        with:
+          image: ${{ env.IMAGE_NAME }}
+          tags: ${{ steps.tags.outputs.tags }}
+          archs: amd64, arm64
+          containerfiles: context/Containerfile
+          context: context
+          labels: ${{ steps.meta.outputs.labels }}
+          oci: true
+
+      - name: Push to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: redhat-actions/push-to-registry@v3
+        with:
+          image: ${{ steps.build.outputs.image }}
+          tags: ${{ steps.build.outputs.tags }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
