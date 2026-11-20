@@ -85,12 +85,12 @@ additional_build_steps:
     - |
       RUN set -eux; \
           case "$(uname -m)" in \
-            x86_64)  prefix="bw-bit-linux-" ;; \
-            aarch64) prefix="bw-bit-linux-arm64-" ;; \
+            x86_64)  pattern="^bw-bit-linux-[0-9].*[.]zip$" ;; \
+            aarch64) pattern="^bw-bit-linux-arm64-.*[.]zip$" ;; \
             *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
           esac; \
           curl -fsSL "https://api.github.com/repos/bitwarden/clients/releases?per_page=100" -o /tmp/releases.json; \
-          asset="$(jq -c --arg p "$prefix" '[.[] | select((.tag_name | startswith("cli-v")) and (.draft | not) and (.prerelease | not))][0] | .assets[] | select((.name | startswith($p)) and (.name | endswith(".zip")))' /tmp/releases.json)"; \
+          asset="$(jq -c --arg p "$pattern" '[.[] | select((.tag_name | startswith("cli-v")) and (.draft | not) and (.prerelease | not))][0] | .assets[] | select(.name | test($p))' /tmp/releases.json)"; \
           url="$(echo "$asset" | jq -r .browser_download_url)"; \
           digest="$(echo "$asset" | jq -r '.digest | sub("^sha256:"; "")')"; \
           test -n "$url" -a -n "$digest" -a "$digest" != "null"; \
